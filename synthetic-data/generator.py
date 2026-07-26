@@ -118,23 +118,18 @@ def generate_normal_logs(profiles, start_time, duration_days=7):
 # -------------------------------------------------------------------
 if __name__ == "__main__":
     print("Generating persistent entity profiles...")
-    profiles = create_entity_profiles(num_users=50, num_services=10, num_devices=20)
+    # Expanded entity pool for higher volume
+    profiles = create_entity_profiles(num_users=150, num_services=30, num_devices=50)
 
-    print("Simulating 7 days of normal access events...")
+    print("Simulating 14 days of normal access events...")
     start_date = datetime(2026, 7, 1)
-    raw_logs = generate_normal_logs(profiles, start_date, duration_days=7)
+    raw_logs = generate_normal_logs(profiles, start_date, duration_days=14)
 
-    # Convert to Pandas DataFrame
     df = pd.DataFrame(raw_logs)
-
-    # Sort logs chronologically by timestamp
     df = df.sort_values(by="timestamp").reset_index(drop=True)
 
-    # Save to CSV
     export_path = "exports/normal_baseline_logs.csv"
     df.to_csv(export_path, index=False)
 
     print(f"\nSuccess! Generated {len(df)} normal logs.")
     print(f"File saved to: {export_path}")
-    print("\nSample Data (First 3 rows):")
-    print(df[['timestamp', 'entity_id', 'entity_type', 'source_ip', 'resource_accessed', 'label']].head(3))

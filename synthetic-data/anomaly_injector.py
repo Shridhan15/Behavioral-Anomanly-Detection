@@ -260,36 +260,30 @@ if __name__ == "__main__":
         print(f"Error: {baseline_path} not found. Please run generator.py first.")
         exit(1)
 
-    print("Injecting attack patterns and edge cases (extreme class imbalance)...")
+    print("Injecting scaled attack patterns and edge cases...")
     
     anomalies = []
-    anomalies.extend(inject_brute_force(df_baseline, num_attacks=4))
-    anomalies.extend(inject_impossible_travel(df_baseline, num_attacks=4))
-    anomalies.extend(inject_device_spoofing(df_baseline, num_attacks=4))
-    anomalies.extend(inject_lateral_movement(df_baseline, num_attacks=3))
-    anomalies.extend(inject_credential_stuffing(df_baseline, num_attacks=3))
-    anomalies.extend(inject_low_and_slow(df_baseline, num_cases=3))
-    anomalies.extend(inject_insider_drift(df_baseline, num_cases=5))
+    # Increased injection volume to build a robust dataset
+    anomalies.extend(inject_brute_force(df_baseline, num_attacks=25))
+    anomalies.extend(inject_impossible_travel(df_baseline, num_attacks=25))
+    anomalies.extend(inject_device_spoofing(df_baseline, num_attacks=25))
+    anomalies.extend(inject_lateral_movement(df_baseline, num_attacks=20))
+    anomalies.extend(inject_credential_stuffing(df_baseline, num_attacks=20))
+    anomalies.extend(inject_low_and_slow(df_baseline, num_cases=20))
+    anomalies.extend(inject_insider_drift(df_baseline, num_cases=30))
  
     df_anomalies = pd.DataFrame(anomalies)
 
-    # Combine normal logs with injected anomalies
     df_final = pd.concat([df_baseline, df_anomalies], ignore_index=True)
- 
     df_final['timestamp'] = pd.to_datetime(df_final['timestamp'])
     df_final = df_final.sort_values(by="timestamp").reset_index(drop=True)
 
-    # Export final, combined dataset ready for ML training
     final_export_path = "exports/final_training_dataset.csv"
     df_final.to_csv(final_export_path, index=False)
 
-    # Printing evaluation metrics for terminal verification
     print("\n--- DATASET GENERATION COMPLETE ---")
     print(f"Total Rows Generated: {len(df_final)}")
-    print(f"Normal Rows (Baseline): {len(df_baseline)}")
+    print(f"Normal Rows: {len(df_baseline)}")
     print(f"Injected Anomaly Rows: {len(df_anomalies)}")
     print(f"Anomaly Proportion: {(len(df_anomalies) / len(df_final)) * 100:.2f}%")
-    print(f"\nSaved final training dataset to: {final_export_path}")
-
-    print("\nLabel Breakdown:")
-    print(df_final['label'].value_counts())
+    print(f"Saved final training dataset to: {final_export_path}")
