@@ -1,10 +1,9 @@
 """
- 
 This module serves as the primary inference engine and explainability layer. 
 It loads all saved model artifacts (.joblib, .h5) into memory at startup to 
 eliminate load times during inference. It exposes endpoints for real-time log 
-evaluation and generates structured, human-readable explanations for security 
-analysts, detailing why an anomaly was flagged.
+evaluation, dataset statistics, and generates structured, human-readable 
+explanations for security analysts, detailing why an anomaly was flagged.
 """
 
 import os
@@ -19,13 +18,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import tensorflow as tf
 
- 
+
 app = FastAPI(
     title="Cybersecurity Anomaly Detection AI Engine",
     version="1.0.0",
     description="FastAPI microservice for real-time threat detection and anomaly explainability."
 )
- 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,18 +33,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
- 
+
 MODEL_DIR = os.path.join("..", "ml-engine", "saved_models")
+DATASET_DIR = os.path.join("..", "synthetic-data", "exports")
 
 models = {
     "encoders": None,
     "scaler": None,
+    "scaler_fails": None,  
+    "scaler_time": None,   
     "svm": None,
     "lstm": None,
     "label_encoder": None
 }
 
- 
+
 class LogEvent(BaseModel):
     entity_id: str = Field(..., example="usr_mkt_014")
     entity_type: str = Field(..., example="user")
@@ -58,17 +60,26 @@ class LogEvent(BaseModel):
     command_sequence: List[str] = Field(default_factory=list, example=["GET /finance/db_backup_chunk"])
     device_fingerprint: str = Field(..., example="Android 11 | Spoofed Build v4.1")
 
+
 class SequencePredictionRequest(BaseModel):
     logs: List[LogEvent] = Field(..., min_items=1, max_items=10)
 
- 
+
 @app.on_event("startup")
 async def load_artifacts():
     """Loads preprocessor rules and trained weights into RAM once on startup."""
-    print("Loading machine learning models and encoders into memory...")
+    print("Loading machine learning models and encoders into memory...") 
+    
     try:
         models["encoders"] = joblib.load(os.path.join(MODEL_DIR, "encoders.joblib"))
+        models["label_encoder"] = joblib.load(
+    os.path.join(MODEL_DIR, "label_encoder.joblib")
+)
+        print("Available classes:")
+        print(models["label_encoder"].classes_)
         models["scaler"] = joblib.load(os.path.join(MODEL_DIR, "scaler.joblib"))
+        models["scaler_fails"] = joblib.load(os.path.join(MODEL_DIR, "scaler_fails.joblib")) 
+        models["scaler_time"] = joblib.load(os.path.join(MODEL_DIR, "scaler_time.joblib")) 
         models["svm"] = joblib.load(os.path.join(MODEL_DIR, "one_class_svm.joblib"))
         models["label_encoder"] = joblib.load(os.path.join(MODEL_DIR, "label_encoder.joblib"))
         models["lstm"] = tf.keras.models.load_model(os.path.join(MODEL_DIR, "lstm_sequence_model.h5"))
@@ -78,8 +89,8 @@ async def load_artifacts():
 
 
 
-def transform_log(log: LogEvent) -> np.ndarray:
-    """Translates a raw input log JSON into the 7-feature numerical vector."""
+def transform_log(log: LogEvent, time_delta: float = 0.0) -> np.ndarray:
+    """Translates a raw input log JSON into the complete 9-feature numerical vector."""
     encoders = models["encoders"]
     scaler = models["scaler"]
 
@@ -97,11 +108,18 @@ def transform_log(log: LogEvent) -> np.ndarray:
     auth = safe_encode(encoders['auth_method'], log.auth_method)
     dev = safe_encode(encoders['device_fingerprint'], log.device_fingerprint)
 
-    # Scale session duration and hour of day
+    # Scale session duration and hour of day (Features 6 & 7)
     scaled_num = scaler.transform([[log.session_duration, hour]])[0]
     duration_scaled, hour_scaled = scaled_num[0], scaled_num[1]
 
-    return np.array([e_id, ip, res, auth, dev, duration_scaled, hour_scaled])
+    # Extract and scale the 8th feature dynamically (Failed Auths)
+    failed_auth_count = sum(1 for cmd in log.command_sequence if "FAILED" in cmd)
+    fails_scaled = models["scaler_fails"].transform([[failed_auth_count]])[0][0]
+
+    # Extract and scale the 9th feature dynamically (Time Delta)
+    time_scaled = models["scaler_time"].transform([[time_delta]])[0][0]
+
+    return np.array([e_id, ip, res, auth, dev, duration_scaled, hour_scaled, fails_scaled, time_scaled])
 
 
 
@@ -113,24 +131,19 @@ def generate_explanation(log: LogEvent, predicted_class: str, confidence: float)
     reasons = []
     dt = pd.to_datetime(log.timestamp)
 
-    # hours check  
     if 1 <= dt.hour <= 4:
         reasons.append(f"Unusual activity timing detected at {dt.strftime('%H:%M')} AM (Off-hours window).")
 
-    #   High-privilege / Sensitive resource access
     sensitive_paths = ["/admin", "/root", "/finance", "/export", "/db_backup"]
     if any(path in log.resource_accessed for path in sensitive_paths):
         reasons.append(f"Accessed restricted critical resource target: '{log.resource_accessed}'.")
 
-    #   Spoofed / Unknown device fingerprint
     if "Spoofed" in log.device_fingerprint or "Curl" in log.device_fingerprint:
         reasons.append(f"Suspicious client agent or unverified device fingerprint: '{log.device_fingerprint}'.")
 
-    #   Suspicious IP / Geo-location
     if "Unknown" in log.geo_location or log.source_ip.startswith("185.") or log.source_ip.startswith("45."):
         reasons.append(f"Source IP ({log.source_ip}) associated with unverified proxy or external subnet ({log.geo_location}).")
 
-    #   Failed command indicators
     if any("FAILED" in cmd for cmd in log.command_sequence):
         reasons.append("Command telemetry indicates multiple failed authentication attempts.")
 
@@ -145,7 +158,8 @@ def generate_explanation(log: LogEvent, predicted_class: str, confidence: float)
     }
 
 
-# ENDPOINTS
+# --- API ENDPOINTS ---
+
 @app.get("/api/health")
 async def health_check():
     return {
@@ -153,6 +167,28 @@ async def health_check():
         "models_loaded": all(v is not None for v in models.values()),
         "timestamp": datetime.now().isoformat()
     }
+
+
+@app.get("/api/stats/distribution")
+async def get_data_distribution():
+    """
+    Reads the final dataset and returns the actual class distributions 
+    to populate the UI overview sidebar.
+    """
+    try:
+        dataset_path = os.path.join(DATASET_DIR, "final_training_dataset.csv")
+        df = pd.read_csv(dataset_path)
+        
+        counts = df['label'].value_counts().to_dict()
+        total = len(df)
+        
+        return {
+            "total_sequences": total,
+            "class_distribution": counts
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load dataset distribution: {str(e)}")
+
 
 @app.post("/api/predict/single")
 async def predict_single_log(log: LogEvent):
@@ -162,7 +198,7 @@ async def predict_single_log(log: LogEvent):
     if models["svm"] is None:
         raise HTTPException(status_code=503, detail="Models are not initialized.")
 
-    feature_vector = transform_log(log).reshape(1, -1)
+    feature_vector = transform_log(log)[:7].reshape(1, -1)
     prediction = models["svm"].predict(feature_vector)[0]
     
     is_anomaly = bool(prediction == -1)
@@ -181,26 +217,34 @@ async def predict_single_log(log: LogEvent):
         "explanation": explanation
     }
 
+
 @app.post("/api/predict/sequence")
 async def predict_log_sequence(request: SequencePredictionRequest):
     """
-    Evaluates a sequence of 5 chronological logs using the LSTM deep learning model.
+    Evaluates a sequence of 5 chronological logs using the Bi-LSTM deep learning model.
     """
     if models["lstm"] is None:
         raise HTTPException(status_code=503, detail="Sequence model not initialized.")
 
-
     raw_logs = request.logs
     if len(raw_logs) < 5:
-        
         raw_logs = [raw_logs[0]] * (5 - len(raw_logs)) + raw_logs
 
-    # Take the last 5 logs
     recent_logs = raw_logs[-5:]
-    feature_matrix = np.array([transform_log(l) for l in recent_logs])
-    input_tensor = np.expand_dims(feature_matrix, axis=0)  # Shape: (1, 5, 7)
+    
+    feature_matrix = []
+    for i, log in enumerate(recent_logs):
+        if i == 0:
+            delta = 0.0
+        else:
+            dt_curr = pd.to_datetime(log.timestamp)
+            dt_prev = pd.to_datetime(recent_logs[i-1].timestamp)
+            delta = (dt_curr - dt_prev).total_seconds()
+            
+        feature_matrix.append(transform_log(log, delta))
+        
+    input_tensor = np.expand_dims(np.array(feature_matrix), axis=0)
 
-    # Predict class probabilities
     probabilities = models["lstm"].predict(input_tensor)[0]
     predicted_class_idx = np.argmax(probabilities)
     confidence = probabilities[predicted_class_idx]

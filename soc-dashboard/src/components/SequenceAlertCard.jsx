@@ -15,7 +15,7 @@ export default function SequenceAlertCard({ result }) {
   const confidencePct = (result.confidence_score * 100).toFixed(2);
 
   return (
-    <div className={`mt-6 p-6 rounded-lg shadow-lg border ${cardStyles}`}>
+    <div className={`p-6 rounded-lg shadow-lg border ${cardStyles}`}>
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
